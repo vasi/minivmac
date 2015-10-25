@@ -3,7 +3,6 @@
 
 /*
 TODO
-- Test
 - Write comments
 - Plug into Mini vMac
 - Locking
