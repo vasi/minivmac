@@ -34,7 +34,7 @@
 #include "MYOSGLUE.h"
 
 typedef struct {
-  const char *path;
+  char *path;
   off_t size;
   off_t band_size;
 } sparsebundle;
@@ -1309,6 +1309,7 @@ GLOBALPROC PbufTransfer(ui3p Buffer,
 
 /* --- drives --- */
 
+LOCALVAR sparsebundle *Sparsebundles[NumDrives];
 LOCALVAR SInt16 Drives[NumDrives]; /* open disk image files */
 
 GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
@@ -1317,23 +1318,41 @@ GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
 {
 	ByteCount actualCount;
 	tMacErr result;
+	ssize_t sb_ret;
+	sparsebundle *sb = Sparsebundles[Drive_No];
 
 	if (IsWrite) {
-		result = To_tMacErr(FSWriteFork(
-			Drives[Drive_No],
-			fsFromStart,
-			Sony_Start,
-			Sony_Count,
-			Buffer,
-			&actualCount));
+		if (sb) {
+			sb_ret = sparsebundle_write(sb, Buffer, Sony_Count, Sony_Start);
+		} else {
+			result = To_tMacErr(FSWriteFork(
+				Drives[Drive_No],
+				fsFromStart,
+				Sony_Start,
+				Sony_Count,
+				Buffer,
+				&actualCount));
+		}
 	} else {
-		result = To_tMacErr(FSReadFork(
-			Drives[Drive_No],
-			fsFromStart,
-			Sony_Start,
-			Sony_Count,
-			Buffer,
-			&actualCount));
+		if (sb) {
+			sb_ret = sparsebundle_read(sb, Buffer, Sony_Count, Sony_Start);
+		} else {
+			result = To_tMacErr(FSReadFork(
+				Drives[Drive_No],
+				fsFromStart,
+				Sony_Start,
+				Sony_Count,
+				Buffer,
+				&actualCount));
+		}
+	}
+
+	if (sb) {
+		if (sb_ret == -1) {
+			return mnvm_miscErr;
+		}
+		actualCount = sb_ret;
+		result = mnvm_noErr;
 	}
 
 	if (nullpr != Sony_ActCount) {
@@ -1345,21 +1364,33 @@ GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
 
 GLOBALFUNC tMacErr vSonyGetSize(tDrive Drive_No, ui5r *Sony_Count)
 {
-	SInt64 forkSize;
-	tMacErr err = To_tMacErr(
-		FSGetForkSize(Drives[Drive_No], &forkSize));
-	*Sony_Count = forkSize;
-	return err;
+	if (Sparsebundles[Drive_No]) {
+		*Sony_Count = Sparsebundles[Drive_No]->size;
+		return mnvm_noErr;
+	} else {
+		SInt64 forkSize;
+		tMacErr err = To_tMacErr(
+			FSGetForkSize(Drives[Drive_No], &forkSize));
+		*Sony_Count = forkSize;
+		return err;
+	}
 }
 
 GLOBALFUNC tMacErr vSonyEject(tDrive Drive_No)
 {
 	SInt16 refnum = Drives[Drive_No];
+	sparsebundle *sb = Sparsebundles[Drive_No];
+
 	Drives[Drive_No] = NotAfileRef;
+	Sparsebundles[Drive_No] = NULL;
 
 	DiskEjectedNotify(Drive_No);
 
-	(void) FSCloseFork(refnum);
+	if (sb) {
+		sparsebundle_close(sb);
+	} else {
+		(void) FSCloseFork(refnum);
+	}
 
 	return mnvm_noErr;
 }
@@ -3110,6 +3141,7 @@ LOCALPROC InitDrives(void)
 
 	for (i = 0; i < NumDrives; ++i) {
 		Drives[i] = NotAfileRef;
+		Sparsebundles[i] = NULL;
 	}
 }
 
@@ -3124,15 +3156,20 @@ LOCALPROC UnInitDrives(void)
 	}
 }
 
-LOCALFUNC tMacErr Sony_Insert0(SInt16 refnum, blnr locked)
+LOCALFUNC tMacErr Sony_Insert0(SInt16 refnum, sparsebundle *sb, blnr locked)
 {
 	tDrive Drive_No;
 
 	if (! FirstFreeDisk(&Drive_No)) {
+	if (sb) {
+		sparsebundle_close(sb);
+	} else {
 		(void) FSCloseFork(refnum);
+	}
 		return mnvm_tmfoErr;
 	} else {
 		Drives[Drive_No] = refnum;
+		Sparsebundles[Drive_No] = sb;
 		DiskInsertNotify(Drive_No, locked);
 		return mnvm_noErr;
 	}
@@ -3158,7 +3195,16 @@ LOCALFUNC tMacErr InsertADiskFromFSRef(FSRef *theRef)
 	tMacErr err;
 	HFSUniStr255 forkName;
 	SInt16 refnum;
+	UInt8 path[PATH_MAX];
 	blnr locked = falseblnr;
+
+	if (CheckSaveMacErr(FSRefMakePath(theRef, path, PATH_MAX))) {
+		sparsebundle *sb = sparsebundle_open((const char *)path);
+		if (sb) {
+			Sony_Insert0(0, sb, falseblnr);
+			return mnvm_noErr;
+		}
+	}
 
 	if (CheckSaveMacErr(FSGetDataForkName(&forkName))) {
 		err = To_tMacErr(FSOpenFork(theRef, forkName.length,
@@ -3175,7 +3221,7 @@ LOCALFUNC tMacErr InsertADiskFromFSRef(FSRef *theRef)
 				break;
 		}
 		if (mnvm_noErr == err) {
-			err = Sony_Insert0(refnum, locked);
+			err = Sony_Insert0(refnum, NULL, locked);
 		}
 	}
 
@@ -3315,7 +3361,7 @@ LOCALFUNC tMacErr MakeNewDisk0(FSRef *saveFileParent,
 			*/
 			if (CheckSavetMacErr(WriteZero(refnum, L)))
 			{
-				err = Sony_Insert0(refnum, falseblnr);
+				err = Sony_Insert0(refnum, NULL, falseblnr);
 				refnum = NotAfileRef;
 			}
 			if (NotAfileRef != refnum) {
@@ -5601,7 +5647,8 @@ sparsebundle *sparsebundle_open(const char *path) {
   if (!sb) {
     return NULL;
   }
-  sb->path = path;
+  sb->path = malloc(strlen(path) + 1);
+  strcpy(sb->path, path);
   sb->size = total_size;
   sb->band_size = band_size;
   return sb;
@@ -5609,7 +5656,7 @@ sparsebundle *sparsebundle_open(const char *path) {
 
 void sparsebundle_close(sparsebundle *sb) {
   if (sb) {
-    sb->path = NULL;
+	free(sb->path);
     free(sb);
   }
 }

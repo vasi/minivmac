@@ -4,6 +4,10 @@
 TODO
 - Write comments
 - Plug into Mini vMac
+  - LoadInitialImages
+  - vSonyEjectDelete
+  - vSonyGetName
+  - others?
 - Locking
 - Don't write zeros
 - Read-only opening?
