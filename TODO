@@ -1,0 +1,16 @@
+Better comments
+Plug into Mini vMac
+  LoadInitialImages
+  vSonyEjectDelete
+  vSonyGetName
+  others?
+Locking
+Don't write zeros
+Read-only opening?
+Don't use asprintf
+Convert to Mini vMac style
+Convert to Mini vMac typedefs
+Performance
+  Band fd caching?
+Abstract out platform things: open, read/write, locking
+Write custom plist reader
