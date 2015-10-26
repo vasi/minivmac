@@ -33,6 +33,8 @@
 
 #include "MYOSGLUE.h"
 
+#define SPARSEBUNDLE_BAND_CACHE 8
+
 typedef enum {
 	SPARSEBUNDLE_BAND_INIT = 0,
 	SPARSEBUNDLE_BAND_NONE,
@@ -40,13 +42,17 @@ typedef enum {
 } sparsebundle_band_status;
 
 typedef struct {
+	sparsebundle_band_status status;
+	size_t index;
+	int fd;
+} sparsebundle_band;
+
+typedef struct {
 	char *path;
 	off_t size;
 	off_t band_size;
-
-	sparsebundle_band_status current_band_status;
-	size_t current_band;
-	int current_band_fd;
+	sparsebundle_band bands[SPARSEBUNDLE_BAND_CACHE];
+	size_t evict;
 } sparsebundle;
 
 sparsebundle *sparsebundle_open(const char *path);
@@ -5664,15 +5670,20 @@ sparsebundle *sparsebundle_open(const char *path)
 	strcpy(sb->path, path);
 	sb->size = total_size;
 	sb->band_size = band_size;
-	sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
+	for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
+		sb->bands[i].status = SPARSEBUNDLE_BAND_INIT;
+	}
+	sb->evict = 0;
 	return sb;
 }
 
 void sparsebundle_close(sparsebundle *sb)
 {
 	if (sb) {
-		if (sb->current_band_status == SPARSEBUNDLE_BAND_FILE) {
-			close(sb->current_band_fd);
+		for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
+			if (sb->bands[i].status == SPARSEBUNDLE_BAND_FILE) {
+				close(sb->bands[i].fd);
+			}
 		}
 		free(sb->path);
 		free(sb);
@@ -5690,21 +5701,36 @@ int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
 	}
 
 	// Can we use what's in the cache?
-	if (sb->current_band == band_index) {
-		sparsebundle_band_status target = create
-			? SPARSEBUNDLE_BAND_FILE
-			: SPARSEBUNDLE_BAND_NONE;
-		if (sb->current_band_status >= target) {
-			if (status) {
-				*status = sb->current_band_status;
+	sparsebundle_band_status target = create
+		? SPARSEBUNDLE_BAND_FILE
+		: SPARSEBUNDLE_BAND_NONE;
+	ssize_t evict = -1;
+	for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
+		sparsebundle_band *band = &sb->bands[i];
+		if (band->index == band_index &&
+			band->status != SPARSEBUNDLE_BAND_INIT)
+		{
+			if (band->status >= target) {
+				if (status) {
+					*status = band->status;
+				}
+				return band->fd;
 			}
-			return sb->current_band_fd;
+			evict = i;
+			break;
 		}
 	}
-	if (sb->current_band_status == SPARSEBUNDLE_BAND_FILE) {
-		close(sb->current_band_fd);
+
+	// Evict an entry.
+	if (evict == -1) {
+		evict = sb->evict;
+		sb->evict = (sb->evict + 1) % SPARSEBUNDLE_BAND_CACHE;
 	}
-	sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
+	sparsebundle_band *band = &sb->bands[evict];
+	if (band->status == SPARSEBUNDLE_BAND_FILE) {
+		close(band->fd);
+	}
+	band->status = SPARSEBUNDLE_BAND_INIT;
 
 	// Check if the band is in range.
 	if (band_index < 0 || band_index * sb->band_size >= sb->size) {
@@ -5716,22 +5742,23 @@ int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
 		return -1;
 	}
 	int flags = O_RDWR | (create ? O_CREAT : 0);
-	sb->current_band_fd = open(path, flags, 0600);
+	fprintf(stderr, "Opening %lld\n", band_index);
+	band->fd = open(path, flags, 0600);
 	free(path);
 
-	sb->current_band = band_index;
-	if (sb->current_band_fd != -1) {
-		sb->current_band_status = SPARSEBUNDLE_BAND_FILE;
+	band->index = band_index;
+	if (band->fd != -1) {
+		band->status = SPARSEBUNDLE_BAND_FILE;
 	} else if (errno == ENOENT) {
-		sb->current_band_status = SPARSEBUNDLE_BAND_NONE;
+		band->status = SPARSEBUNDLE_BAND_NONE;
 	} else {
-		sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
+		band->status = SPARSEBUNDLE_BAND_INIT;
 	}
 	if (status) {
-		*status = sb->current_band_status;
+		*status = band->status;
 	}
 
-	return sb->current_band_fd;
+	return band->fd;
 }
 
 ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
