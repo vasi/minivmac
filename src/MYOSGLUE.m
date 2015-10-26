@@ -33,10 +33,20 @@
 
 #include "MYOSGLUE.h"
 
+typedef enum {
+	SPARSEBUNDLE_BAND_INIT = 0,
+	SPARSEBUNDLE_BAND_NONE,
+	SPARSEBUNDLE_BAND_FILE,
+} sparsebundle_band_status;
+
 typedef struct {
 	char *path;
 	off_t size;
 	off_t band_size;
+
+	sparsebundle_band_status current_band_status;
+	size_t current_band;
+	int current_band_fd;
 } sparsebundle;
 
 sparsebundle *sparsebundle_open(const char *path);
@@ -5597,8 +5607,8 @@ bool sparsebundle_op_write(sparsebundle *sb, size_t band_index, char *buf,
 ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
 	size_t nbyte, off_t offset);
 
-int sparsebundle_open_band(sparsebundle *sb, off_t band_index, int flags,
-	bool *noband);
+int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
+	sparsebundle_band_status *status);
 
 
 bool sparsebundle_read_plist(const char *plist, off_t *band_size,
@@ -5654,27 +5664,47 @@ sparsebundle *sparsebundle_open(const char *path)
 	strcpy(sb->path, path);
 	sb->size = total_size;
 	sb->band_size = band_size;
+	sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
 	return sb;
 }
 
 void sparsebundle_close(sparsebundle *sb)
 {
 	if (sb) {
+		if (sb->current_band_status == SPARSEBUNDLE_BAND_FILE) {
+			close(sb->current_band_fd);
+		}
 		free(sb->path);
 		free(sb);
 	}
 }
 
-int sparsebundle_open_band(sparsebundle *sb, off_t band_index, int flags,
-	bool *noband)
+int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
+	sparsebundle_band_status *status)
 {
-	if (noband) {
-		*noband = false;
+	if (status) {
+		*status = SPARSEBUNDLE_BAND_INIT;
 	}
-
 	if (!sb) {
 		return -1;
 	}
+
+	// Can we use what's in the cache?
+	if (sb->current_band == band_index) {
+		sparsebundle_band_status target = create
+			? SPARSEBUNDLE_BAND_FILE
+			: SPARSEBUNDLE_BAND_NONE;
+		if (sb->current_band_status >= target) {
+			if (status) {
+				*status = sb->current_band_status;
+			}
+			return sb->current_band_fd;
+		}
+	}
+	if (sb->current_band_status == SPARSEBUNDLE_BAND_FILE) {
+		close(sb->current_band_fd);
+	}
+	sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
 
 	// Check if the band is in range.
 	if (band_index < 0 || band_index * sb->band_size >= sb->size) {
@@ -5685,13 +5715,23 @@ int sparsebundle_open_band(sparsebundle *sb, off_t band_index, int flags,
 	if (asprintf(&path, "%s/bands/%llx", sb->path, band_index) == -1) {
 		return -1;
 	}
-	int fd = open(path, flags);
+	int flags = O_RDWR | (create ? O_CREAT : 0);
+	sb->current_band_fd = open(path, flags, 0600);
 	free(path);
 
-	if (fd == -1 && errno == ENOENT && noband) {
-		*noband = true;
+	sb->current_band = band_index;
+	if (sb->current_band_fd != -1) {
+		sb->current_band_status = SPARSEBUNDLE_BAND_FILE;
+	} else if (errno == ENOENT) {
+		sb->current_band_status = SPARSEBUNDLE_BAND_NONE;
+	} else {
+		sb->current_band_status = SPARSEBUNDLE_BAND_INIT;
 	}
-	return fd;
+	if (status) {
+		*status = sb->current_band_status;
+	}
+
+	return sb->current_band_fd;
 }
 
 ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
@@ -5739,16 +5779,15 @@ ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
 bool sparsebundle_op_read(sparsebundle *sb, size_t band_index, char *buf,
 	size_t nbyte, off_t offset)
 {
-	bool noband = false;
-	int fd = sparsebundle_open_band(sb, band_index, O_RDONLY, &noband);
+	sparsebundle_band_status status = SPARSEBUNDLE_BAND_INIT;
+	int fd = sparsebundle_open_band(sb, band_index, false, &status);
 
-	if (fd == -1 && !noband) {
+	if (fd == -1 && status != SPARSEBUNDLE_BAND_NONE) {
 		return false;
 	}
 
 	if (fd != -1) {
 		ssize_t did_read = pread(fd, buf, nbyte, offset);
-		close(fd);
 		if (did_read == -1) {
 			return false;
 		}
@@ -5764,14 +5803,13 @@ bool sparsebundle_op_read(sparsebundle *sb, size_t band_index, char *buf,
 bool sparsebundle_op_write(sparsebundle *sb, size_t band_index, char *buf,
 	size_t nbyte, off_t offset)
 {
-	int fd = sparsebundle_open_band(sb, band_index, O_WRONLY | O_CREAT, NULL);
+	int fd = sparsebundle_open_band(sb, band_index, true, NULL);
 
 	if (fd == -1) {
 		return false;
 	}
 
 	ssize_t did_write = pwrite(fd, buf, nbyte, offset);
-	close(fd);
 	return did_write == nbyte;
 }
 
