@@ -5742,7 +5742,6 @@ int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
 		return -1;
 	}
 	int flags = O_RDWR | (create ? O_CREAT : 0);
-	fprintf(stderr, "Opening %lld\n", band_index);
 	band->fd = open(path, flags, 0600);
 	free(path);
 
