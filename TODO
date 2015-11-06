@@ -11,4 +11,3 @@ Don't use asprintf
 Convert to Mini vMac style
 Convert to Mini vMac typedefs
 Abstract out platform things: open, read/write, locking
-Write custom plist reader

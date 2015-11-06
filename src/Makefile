@@ -10,9 +10,6 @@ minivmac: $(OBJECTS)
 %.o: %.S
 	$(CC) $(CFLAGS) -o $@ -c $<
 
-%.o: %.m
-	$(CC) $(CFLAGS) -o $@ -c $<
-
 %.o: %.c
 	$(CC) $(CFLAGS) -o $@ -c $<
 

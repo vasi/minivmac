@@ -5600,7 +5600,7 @@ int main(void)
 }
 
 
-bool sparsebundle_read_plist(const char *plist, off_t *band_size,
+bool sparsebundle_plist_parse(const char *plist, off_t *band_size,
 	off_t *total_size);
 
 typedef bool (*sparsebundle_op)(sparsebundle *sb, size_t band_index, char *buf,
@@ -5617,36 +5617,129 @@ int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
 	sparsebundle_band_status *status);
 
 
-bool sparsebundle_read_plist(const char *plist, off_t *band_size,
+#define SPARSEBUNDLE_PLIST_BUFSIZE 4096
+#define SPARSEBUNDLE_PLIST_KEYSIZE 64
+#define SPARSEBUNDLE_BUNDLE_TYPE "com.apple.diskimage.sparsebundle"
+
+const char *sparsebundle_plist_find(const char *buf, const char *key,
+	const char *type, size_t *len)
+{
+	// Build the key
+	char tmpbuf[SPARSEBUNDLE_PLIST_KEYSIZE];
+	if (strlen(key) + strlen("<key></key>") + 1 > sizeof(tmpbuf)
+		|| strlen(type) + 3 > sizeof(tmpbuf)) {
+		return NULL;
+	}
+
+	strcpy(tmpbuf, "<key>");
+	strcat(tmpbuf, key);
+	strcat(tmpbuf, "</key>");
+
+	// Find the key
+	buf = strstr(buf, tmpbuf);
+	if (!buf) {
+		return NULL;
+	}
+
+	// Skip whitespace
+	buf += strlen(tmpbuf);
+	buf += strspn(buf, " \t\n");
+
+	// Check the type
+	strcpy(tmpbuf, "<");
+	strcat(tmpbuf, type);
+	strcat(tmpbuf, ">");
+	if (strncmp(buf, tmpbuf, strlen(tmpbuf)) != 0) {
+		return NULL;
+	}
+	buf += strlen(tmpbuf);
+	*len = strcspn(buf, "<");
+	return buf;
+}
+
+bool sparsebundle_plist_find_int(const char *buf, const char *key,
+	long long *result)
+{
+	size_t len;
+	const char *str = sparsebundle_plist_find(buf, key, "integer", &len);
+	if (!str) {
+		return false;
+	}
+
+	long long n = 0;
+	for (int i = 0; i < len; ++i) {
+		n *= 10;
+		char c = str[i];
+		if (c < '0' || c > '9') {
+			return false;
+		}
+		n += c - '0';
+	}
+	*result = n;
+	return true;
+}
+
+bool sparsebundle_plist_parse(const char *plist, off_t *band_size,
 	off_t *total_size)
 {
-	NSFileManager *fileManager = [NSFileManager defaultManager];
-	NSString *path = [fileManager stringWithFileSystemRepresentation: plist
-		length: strlen(plist)];
-	NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile: path];
-
-	id value = [dict objectForKey: @"diskimage-bundle-type"];
-	if (![@"com.apple.diskimage.sparsebundle" isEqual: value]) {
+	// Read part of the file into memory.
+	int fd = open(plist, O_RDONLY);
+	if (fd == -1) {
 		return false;
 	}
 
-	off_t size = [[dict objectForKey: @"band-size"] longLongValue];
-	if (size == 0) {
+	char *buf = malloc(SPARSEBUNDLE_PLIST_BUFSIZE);
+	if (!buf) {
 		return false;
 	}
-	if (band_size) {
-		*band_size = size;
+
+	ssize_t nbytes = read(fd, buf, SPARSEBUNDLE_PLIST_BUFSIZE - 1);
+	close(fd);
+	if (nbytes == -1) {
+		goto fail;
+	}
+	buf[nbytes] = '\0';
+
+	// Does it look like a plist?
+	if (strncmp(buf, "<?xml ", strlen("<?xml ")) != 0
+		|| !strstr(buf, "<!DOCTYPE plist "))
+	{
+		goto fail;
 	}
 
-	size = [[dict objectForKey: @"size"] longLongValue];
-	if (size == 0) {
-		return false;
-	}
-	if (total_size) {
-		*total_size = size;
+	// Check the parameters
+	size_t len;
+	const char *v = sparsebundle_plist_find(buf, "diskimage-bundle-type",
+		"string", &len);
+	if (!v || strncmp(v, SPARSEBUNDLE_BUNDLE_TYPE,
+		strlen(SPARSEBUNDLE_BUNDLE_TYPE)) != 0)
+	{
+		goto fail;
 	}
 
+	long long i;
+	if (!sparsebundle_plist_find_int(buf, "bundle-backingstore-version", &i)
+		|| i != 1)
+	{
+		goto fail;
+	}
+
+	if (!sparsebundle_plist_find_int(buf, "size", &i)) {
+		goto fail;
+	}
+	*total_size = i;
+
+	if (!sparsebundle_plist_find_int(buf, "band-size", &i)) {
+		goto fail;
+	}
+	*band_size = i;
+
+	free(buf);
 	return true;
+
+fail:
+	free(buf);
+	return false;
 }
 
 sparsebundle *sparsebundle_open(const char *path)
@@ -5656,7 +5749,7 @@ sparsebundle *sparsebundle_open(const char *path)
 		return NULL;
 	}
 	off_t band_size, total_size;
-	bool ok = sparsebundle_read_plist(plist, &band_size, &total_size);
+	bool ok = sparsebundle_plist_parse(plist, &band_size, &total_size);
 	free(plist);
 	if (!ok) {
 		return NULL;
