@@ -1,0 +1,1 @@
+ClipIn			Ä	ClipIn.DRVW ClipIn.r	Rez -rd -c DMOV -t DFIL ClipIn.r -o ClipInClipIn.DRVW 	Ä	ClipIn.c.o	Link -w -rt DRVW=0 ¶		-sg ClipIn ¶		"{Libraries}"DRVRRuntime.o	# This must preceed CRuntime.o ¶		ClipIn.c.o ¶		"{CLibraries}"CRuntime.o ¶		"{Libraries}"Interface.o ¶		-o ClipIn.DRVW -c "????" -t "????"ClipIn.c.o		Ä	ClipIn.c	C -b2 ClipIn.c

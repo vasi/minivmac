@@ -1,0 +1,1 @@
+ClipOut			Ä	ClipOut.DRVW ClipOut.r	Rez -rd -c DMOV -t DFIL ClipOut.r -o ClipOutClipOut.DRVW 	Ä	ClipOut.c.o	Link -w -rt DRVW=0 ¶		-sg ClipOut ¶		"{Libraries}"DRVRRuntime.o	# This must preceed CRuntime.o ¶		ClipOut.c.o ¶		"{CLibraries}"CRuntime.o ¶		"{Libraries}"Interface.o ¶		-o ClipOut.DRVW -c "????" -t "????"ClipOut.c.o		Ä	ClipOut.c	C -b2 ClipOut.c
