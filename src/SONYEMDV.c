@@ -35,6 +35,7 @@
 #include "EMCONFIG.h"
 #include "GLOBGLUE.h"
 #include "MINEM68K.h"
+#include "SPARSEBL.h"
 #endif
 
 #include "SONYEMDV.h"
@@ -79,6 +80,40 @@ LOCALFUNC tMacErr CheckReadableDrive(tDrive Drive_No)
 	return result;
 }
 
+LOCALFUNC tMacErr vSonyGetSize2(tDrive Drive_No, ui5r *Sony_Count)
+{
+#if HaveSparseBundle
+	if (DiskIsSB(Drive_No)) {
+		return SBGetSize(Drive_No, Sony_Count);
+	}
+#endif
+	return vSonyGetSize(Drive_No, Sony_Count);
+}
+
+LOCALFUNC tMacErr vSonyEject2(tDrive Drive_No)
+{
+#if HaveSparseBundle
+	if (DiskIsSB(Drive_No)) {
+		return SBClose(Drive_No);
+	}
+#endif
+	return vSonyEject(Drive_No);
+}
+
+LOCALFUNC tMacErr vSonyTransfer2(blnr IsWrite, ui3p Buffer,
+	tDrive Drive_No, ui5r Sony_Start, ui5r Sony_Count,
+	ui5r *Sony_ActCount)
+{
+#if HaveSparseBundle
+	if (DiskIsSB(Drive_No)) {
+		return SBTransfer(IsWrite, Buffer, Drive_No, Sony_Start, Sony_Count,
+			Sony_ActCount);
+	}
+#endif
+	return vSonyTransfer(IsWrite, Buffer, Drive_No, Sony_Start, Sony_Count,
+		Sony_ActCount);
+}
+
 LOCALFUNC tMacErr vSonyTransferVM(blnr IsWrite,
 	CPTR Buffera, tDrive Drive_No,
 	ui5r Sony_Start, ui5r Sony_Count, ui5r *Sony_ActCount)
@@ -103,7 +138,7 @@ label_1:
 		if (0 == contig) {
 			result = mnvm_miscErr;
 		} else {
-			result = vSonyTransfer(IsWrite, Buffer, Drive_No,
+			result = vSonyTransfer2(IsWrite, Buffer, Drive_No,
 				offset, contig, &actual);
 			offset += actual;
 			Buffera += actual;
@@ -191,7 +226,7 @@ LOCALFUNC tMacErr DC42BlockChecksum(tDrive Drive_No,
 			n = remaining;
 		}
 
-		result = vSonyTransfer(falseblnr, Buffer, Drive_No, offset,
+		result = vSonyTransfer2(falseblnr, Buffer, Drive_No, offset,
 			n, nullpr);
 		if (mnvm_noErr != result) {
 			return result;
@@ -273,7 +308,7 @@ LOCALPROC Drive_UpdateChecksums(tDrive Drive_No)
 #endif
 
 			/* write Checksums */
-			vSonyTransfer(trueblnr, Buffer, Drive_No,
+			vSonyTransfer2(trueblnr, Buffer, Drive_No,
 				kDC42offset_dataChecksum, Sony_Count, nullpr);
 		}
 #endif
@@ -295,7 +330,7 @@ LOCALFUNC tMacErr vSonyNextPendingInsert(tDrive *Drive_No)
 	if (! vSonyNextPendingInsert0(&i)) {
 		result = mnvm_nsDrvErr;
 	} else {
-		result = vSonyGetSize(i, &L);
+		result = vSonyGetSize2(i, &L);
 		if (mnvm_noErr == result) {
 			/* first, set up for default format */
 			ui5r DataOffset = 0;
@@ -317,7 +352,7 @@ LOCALFUNC tMacErr vSonyNextPendingInsert(tDrive *Drive_No)
 				ui5r Sony_Count = checkheadersize;
 				blnr gotFormat = falseblnr;
 
-				result = vSonyTransfer(falseblnr, Temp, i,
+				result = vSonyTransfer2(falseblnr, Temp, i,
 					checkheaderoffset, Sony_Count, nullpr);
 				if (mnvm_noErr == result) {
 #if Sony_SupportDC42
@@ -413,7 +448,7 @@ LOCALFUNC tMacErr vSonyNextPendingInsert(tDrive *Drive_No)
 		}
 
 		if (mnvm_noErr != result) {
-			(void) vSonyEject(i);
+			(void) vSonyEject2(i);
 		}
 	}
 
@@ -511,7 +546,7 @@ LOCALFUNC tMacErr Drive_Eject(tDrive Drive_No)
 #if Sony_WantChecksumsUpdated
 		Drive_UpdateChecksums(Drive_No);
 #endif
-		result = vSonyEject(Drive_No);
+		result = vSonyEject2(Drive_No);
 		if (QuitOnEject != 0) {
 			if (! AnyDiskInserted()) {
 				ForceMacOff = trueblnr;
@@ -526,6 +561,12 @@ LOCALFUNC tMacErr Drive_Eject(tDrive Drive_No)
 LOCALFUNC tMacErr Drive_EjectDelete(tDrive Drive_No)
 {
 	tMacErr result;
+
+#if HaveSparseBundle
+	if (DiskIsSB(Drive_No)) {
+		return mnvm_paramErr;
+	}
+#endif
 
 	result = CheckReadableDrive(Drive_No);
 	if (mnvm_noErr == result) {
@@ -551,7 +592,7 @@ GLOBALPROC Sony_EjectAllDisks(void)
 #if Sony_WantChecksumsUpdated
 			Drive_UpdateChecksums(i);
 #endif
-			(void) vSonyEject(i);
+			(void) vSonyEject2(i);
 		}
 	}
 }

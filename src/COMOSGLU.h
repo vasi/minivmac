@@ -152,7 +152,7 @@ GLOBALFUNC tMacErr PbufGetSize(tPbuf Pbuf_No, ui5r *Count)
 }
 #endif
 
-LOCALFUNC blnr FirstFreeDisk(tDrive *Drive_No)
+GLOBALFUNC blnr FirstFreeDisk(tDrive *Drive_No)
 {
 	tDrive i;
 
@@ -185,7 +185,7 @@ GLOBALPROC DiskRevokeWritable(tDrive Drive_No)
 	vSonyWritableMask &= ~ ((ui5b)1 << Drive_No);
 }
 
-LOCALPROC DiskInsertNotify(tDrive Drive_No, blnr locked)
+GLOBALPROC DiskInsertNotify(tDrive Drive_No, blnr locked)
 {
 	vSonyInsertedMask |= ((ui5b)1 << Drive_No);
 	if (! locked) {
@@ -195,7 +195,7 @@ LOCALPROC DiskInsertNotify(tDrive Drive_No, blnr locked)
 	QuietEnds();
 }
 
-LOCALPROC DiskEjectedNotify(tDrive Drive_No)
+GLOBALPROC DiskEjectedNotify(tDrive Drive_No)
 {
 	vSonyWritableMask &= ~ ((ui5b)1 << Drive_No);
 	vSonyInsertedMask &= ~ ((ui5b)1 << Drive_No);

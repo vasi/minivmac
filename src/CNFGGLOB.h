@@ -10,6 +10,8 @@
 
 /* adapt to current compiler/host processor */
 
+#define HaveSparseBundle 1
+
 #define BigEndianUnaligned 0
 #define LittleEndianUnaligned 1
 #define MayInline inline

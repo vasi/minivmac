@@ -33,35 +33,6 @@
 
 #include "MYOSGLUE.h"
 
-#define SPARSEBUNDLE_BAND_CACHE 8
-
-typedef enum {
-	SPARSEBUNDLE_BAND_INIT = 0,
-	SPARSEBUNDLE_BAND_NONE,
-	SPARSEBUNDLE_BAND_FILE,
-} sparsebundle_band_status;
-
-typedef struct {
-	sparsebundle_band_status status;
-	size_t index;
-	int fd;
-} sparsebundle_band;
-
-typedef struct {
-	char *path;
-	off_t size;
-	off_t band_size;
-	sparsebundle_band bands[SPARSEBUNDLE_BAND_CACHE];
-	size_t evict;
-} sparsebundle;
-
-sparsebundle *sparsebundle_open(const char *path);
-void sparsebundle_close(sparsebundle *sb);
-ssize_t sparsebundle_read(sparsebundle *sb, void *buf, size_t nbyte,
-	off_t offset);
-ssize_t sparsebundle_write(sparsebundle *sb, void *buf, size_t nbyte,
-	off_t offset);
-
 /* --- adapting to API/ABI version differences --- */
 
 /*
@@ -1325,7 +1296,8 @@ GLOBALPROC PbufTransfer(ui3p Buffer,
 
 /* --- drives --- */
 
-LOCALVAR sparsebundle *Sparsebundles[NumDrives];
+#include "SPARSEBL.h"
+
 LOCALVAR SInt16 Drives[NumDrives]; /* open disk image files */
 
 GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
@@ -1334,41 +1306,23 @@ GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
 {
 	ByteCount actualCount;
 	tMacErr result;
-	ssize_t sb_ret;
-	sparsebundle *sb = Sparsebundles[Drive_No];
 
 	if (IsWrite) {
-		if (sb) {
-			sb_ret = sparsebundle_write(sb, Buffer, Sony_Count, Sony_Start);
-		} else {
-			result = To_tMacErr(FSWriteFork(
-				Drives[Drive_No],
-				fsFromStart,
-				Sony_Start,
-				Sony_Count,
-				Buffer,
-				&actualCount));
-		}
+		result = To_tMacErr(FSWriteFork(
+			Drives[Drive_No],
+			fsFromStart,
+			Sony_Start,
+			Sony_Count,
+			Buffer,
+			&actualCount));
 	} else {
-		if (sb) {
-			sb_ret = sparsebundle_read(sb, Buffer, Sony_Count, Sony_Start);
-		} else {
-			result = To_tMacErr(FSReadFork(
-				Drives[Drive_No],
-				fsFromStart,
-				Sony_Start,
-				Sony_Count,
-				Buffer,
-				&actualCount));
-		}
-	}
-
-	if (sb) {
-		if (sb_ret == -1) {
-			return mnvm_miscErr;
-		}
-		actualCount = sb_ret;
-		result = mnvm_noErr;
+		result = To_tMacErr(FSReadFork(
+			Drives[Drive_No],
+			fsFromStart,
+			Sony_Start,
+			Sony_Count,
+			Buffer,
+			&actualCount));
 	}
 
 	if (nullpr != Sony_ActCount) {
@@ -1380,33 +1334,21 @@ GLOBALFUNC tMacErr vSonyTransfer(blnr IsWrite, ui3p Buffer,
 
 GLOBALFUNC tMacErr vSonyGetSize(tDrive Drive_No, ui5r *Sony_Count)
 {
-	if (Sparsebundles[Drive_No]) {
-		*Sony_Count = Sparsebundles[Drive_No]->size;
-		return mnvm_noErr;
-	} else {
-		SInt64 forkSize;
-		tMacErr err = To_tMacErr(
-			FSGetForkSize(Drives[Drive_No], &forkSize));
-		*Sony_Count = forkSize;
-		return err;
-	}
+	SInt64 forkSize;
+	tMacErr err = To_tMacErr(
+		FSGetForkSize(Drives[Drive_No], &forkSize));
+	*Sony_Count = forkSize;
+	return err;
 }
 
 GLOBALFUNC tMacErr vSonyEject(tDrive Drive_No)
 {
 	SInt16 refnum = Drives[Drive_No];
-	sparsebundle *sb = Sparsebundles[Drive_No];
-
 	Drives[Drive_No] = NotAfileRef;
-	Sparsebundles[Drive_No] = NULL;
 
 	DiskEjectedNotify(Drive_No);
 
-	if (sb) {
-		sparsebundle_close(sb);
-	} else {
-		(void) FSCloseFork(refnum);
-	}
+	(void) FSCloseFork(refnum);
 
 	return mnvm_noErr;
 }
@@ -3157,7 +3099,6 @@ LOCALPROC InitDrives(void)
 
 	for (i = 0; i < NumDrives; ++i) {
 		Drives[i] = NotAfileRef;
-		Sparsebundles[i] = NULL;
 	}
 }
 
@@ -3172,20 +3113,15 @@ LOCALPROC UnInitDrives(void)
 	}
 }
 
-LOCALFUNC tMacErr Sony_Insert0(SInt16 refnum, sparsebundle *sb, blnr locked)
+LOCALFUNC tMacErr Sony_Insert0(SInt16 refnum, blnr locked)
 {
 	tDrive Drive_No;
 
 	if (! FirstFreeDisk(&Drive_No)) {
-	if (sb) {
-		sparsebundle_close(sb);
-	} else {
 		(void) FSCloseFork(refnum);
-	}
 		return mnvm_tmfoErr;
 	} else {
 		Drives[Drive_No] = refnum;
-		Sparsebundles[Drive_No] = sb;
 		DiskInsertNotify(Drive_No, locked);
 		return mnvm_noErr;
 	}
@@ -3211,16 +3147,16 @@ LOCALFUNC tMacErr InsertADiskFromFSRef(FSRef *theRef)
 	tMacErr err;
 	HFSUniStr255 forkName;
 	SInt16 refnum;
-	UInt8 path[PATH_MAX];
+	char path[PATH_MAX];
 	blnr locked = falseblnr;
 
-	if (CheckSaveMacErr(FSRefMakePath(theRef, path, PATH_MAX))) {
-		sparsebundle *sb = sparsebundle_open((const char *)path);
-		if (sb) {
-			Sony_Insert0(0, sb, falseblnr);
+#if HaveSparseBundle
+	if (FSRefMakePath(theRef, (UInt8*)path, sizeof(path)) == noErr) {
+		if (SBOpen(path)) {
 			return mnvm_noErr;
 		}
 	}
+#endif
 
 	if (CheckSaveMacErr(FSGetDataForkName(&forkName))) {
 		err = To_tMacErr(FSOpenFork(theRef, forkName.length,
@@ -3237,7 +3173,7 @@ LOCALFUNC tMacErr InsertADiskFromFSRef(FSRef *theRef)
 				break;
 		}
 		if (mnvm_noErr == err) {
-			err = Sony_Insert0(refnum, NULL, locked);
+			err = Sony_Insert0(refnum, locked);
 		}
 	}
 
@@ -3377,7 +3313,7 @@ LOCALFUNC tMacErr MakeNewDisk0(FSRef *saveFileParent,
 			*/
 			if (CheckSavetMacErr(WriteZero(refnum, L)))
 			{
-				err = Sony_Insert0(refnum, NULL, falseblnr);
+				err = Sony_Insert0(refnum, falseblnr);
 				refnum = NotAfileRef;
 			}
 			if (NotAfileRef != refnum) {
@@ -3482,6 +3418,7 @@ LOCALPROC InsertADisk0(void)
 	if (noErr == NavGetDefaultDialogCreationOptions(&dialogOptions)) {
 		dialogOptions.modality = kWindowModalityAppModal;
 		dialogOptions.optionFlags |= kNavDontAutoTranslate;
+		dialogOptions.optionFlags |= kNavSupportPackages;
 		dialogOptions.optionFlags &= ~ kNavAllowPreviews;
 		if (noErr == NavCreateGetFileDialog(&dialogOptions,
 			(NavTypeListHandle)openList,
@@ -5396,6 +5333,123 @@ static void DisplayRegisterReconfigurationCallback(
 	}
 }
 
+#if HaveSparseBundle
+
+GLOBALFUNC sbpt SBPathCopy(sbpt Path)
+{
+	uimr len;
+	char *copy;
+
+	len = strlen((char*)Path);
+	copy = malloc(len + 1);
+	strcpy(copy, (char*)Path);
+	return copy;
+}
+
+GLOBALPROC SBPathDispose(sbpt Path)
+{
+	free((char*)Path);
+}
+
+GLOBALFUNC tMacErr SBFileOpen(sbfl *File, SBFileOpenStatus *Status,
+	SBFileOpenFlags Flags, sbpt Base, ui3p *Rel)
+{
+	char buf[PATH_MAX];
+	uimr len;
+	int oflags;
+	int fd;
+	int *fdp;
+	char *sep = "/";
+	tMacErr err = mnvm_paramErr;
+	SBFileOpenStatus st = kSBFileOpenError;
+
+	/* Build a path */
+	len = strlen((char*)Base) + 1;
+	if (len > sizeof(buf)) {
+		return mnvm_paramErr;
+	}
+	strcpy(buf, (char*)Base);
+	/* Add each relative path */
+	while (*Rel) {
+		len += strlen((char*)*Rel) + 1;
+		if (len > sizeof(buf)) {
+			goto LabelFail;
+		}
+		strcat(buf, sep);
+		strcat(buf, (char*)(*Rel));
+		++Rel;
+	}
+
+	/* TODO: Handle locking */
+	oflags = (Flags & kSBFileOpenWrite) ? (O_RDWR | O_CREAT) : O_RDONLY;
+	fd = open(buf, oflags);
+	if (fd == -1) {
+		if (errno == ENOENT) {
+			st = kSBFileOpenFileMissing;
+		} else {
+			st = kSBFileOpenError;
+		}
+		err = mnvm_miscErr;
+	} else {
+		st = kSBFileOpenSuccess;
+		err = mnvm_noErr;
+		fdp = malloc(sizeof(int));
+		*fdp = fd;
+		*File = fdp;
+	}
+
+LabelFail:
+	*Status = st;
+	return err;
+}
+
+GLOBALPROC SBFileClose(sbfl File)
+{
+	if (File) {
+		close(*(int*)File);
+		free(File);
+	}
+}
+
+GLOBALFUNC tMacErr SBFileTransfer(sbfl File, blnr Write, ui3p Buffer,
+	uimr Offset, uimr Count, uimr *ActCount)
+{
+	int *fdp;
+	ssize_t ret;
+
+	if (!File) {
+		return mnvm_paramErr;
+	}
+
+	if (Write) {
+		ret = pwrite(*(int*)File, Buffer, Count, Offset);
+	} else {
+		ret = pread(*(int*)File, Buffer, Count, Offset);
+	}
+
+	if (ret == -1) {
+		*ActCount = 0;
+		return mnvm_miscErr;
+	} else {
+		*ActCount = ret;
+		return mnvm_noErr;
+	}
+}
+
+GLOBALFUNC tMacErr SBFileSize(sbfl File, uimr *Size)
+{
+	off_t pos;
+
+	pos = lseek(*(int*)File, 0, SEEK_END);
+	if (pos == -1) {
+		return mnvm_miscErr;
+	}
+	*Size = pos;
+	return mnvm_noErr;
+}
+
+#endif
+
 LOCALFUNC blnr InstallOurEventHandlers(void)
 {
 	EventTypeSpec eventTypes[] = {
@@ -5566,6 +5620,9 @@ LOCALPROC UnInitOSGLU(void)
 	UnInitPbufs();
 #endif
 	UnInitDrives();
+#if HaveSparseBundle
+	UnInitSB();
+#endif
 
 	if (! gTrueBackgroundFlag) {
 		CheckSavedMacMsg();
@@ -5585,6 +5642,9 @@ LOCALPROC UnInitOSGLU(void)
 LOCALPROC ZapOSGLUVars(void)
 {
 	InitDrives();
+#if HaveSparseBundle
+	InitSB();
+#endif
 	ZapWinStateVars();
 }
 
@@ -5597,349 +5657,4 @@ int main(void)
 	UnInitOSGLU();
 
 	return 0;
-}
-
-
-bool sparsebundle_plist_parse(const char *plist, off_t *band_size,
-	off_t *total_size);
-
-typedef bool (*sparsebundle_op)(sparsebundle *sb, size_t band_index, char *buf,
-	size_t nbyte, off_t offset);
-bool sparsebundle_op_read(sparsebundle *sb, size_t band_index, char *buf,
-	size_t nbyte, off_t offset);
-bool sparsebundle_op_write(sparsebundle *sb, size_t band_index, char *buf,
-	size_t nbyte, off_t offset);
-
-ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
-	size_t nbyte, off_t offset);
-
-int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
-	sparsebundle_band_status *status);
-
-
-#define SPARSEBUNDLE_PLIST_BUFSIZE 4096
-#define SPARSEBUNDLE_PLIST_KEYSIZE 64
-#define SPARSEBUNDLE_BUNDLE_TYPE "com.apple.diskimage.sparsebundle"
-
-const char *sparsebundle_plist_find(const char *buf, const char *key,
-	const char *type, size_t *len)
-{
-	// Build the key
-	char tmpbuf[SPARSEBUNDLE_PLIST_KEYSIZE];
-	if (strlen(key) + strlen("<key></key>") + 1 > sizeof(tmpbuf)
-		|| strlen(type) + 3 > sizeof(tmpbuf)) {
-		return NULL;
-	}
-
-	strcpy(tmpbuf, "<key>");
-	strcat(tmpbuf, key);
-	strcat(tmpbuf, "</key>");
-
-	// Find the key
-	buf = strstr(buf, tmpbuf);
-	if (!buf) {
-		return NULL;
-	}
-
-	// Skip whitespace
-	buf += strlen(tmpbuf);
-	buf += strspn(buf, " \t\n");
-
-	// Check the type
-	strcpy(tmpbuf, "<");
-	strcat(tmpbuf, type);
-	strcat(tmpbuf, ">");
-	if (strncmp(buf, tmpbuf, strlen(tmpbuf)) != 0) {
-		return NULL;
-	}
-	buf += strlen(tmpbuf);
-	*len = strcspn(buf, "<");
-	return buf;
-}
-
-bool sparsebundle_plist_find_int(const char *buf, const char *key,
-	long long *result)
-{
-	size_t len;
-	const char *str = sparsebundle_plist_find(buf, key, "integer", &len);
-	if (!str) {
-		return false;
-	}
-
-	long long n = 0;
-	for (int i = 0; i < len; ++i) {
-		n *= 10;
-		char c = str[i];
-		if (c < '0' || c > '9') {
-			return false;
-		}
-		n += c - '0';
-	}
-	*result = n;
-	return true;
-}
-
-bool sparsebundle_plist_parse(const char *plist, off_t *band_size,
-	off_t *total_size)
-{
-	// Read part of the file into memory.
-	int fd = open(plist, O_RDONLY);
-	if (fd == -1) {
-		return false;
-	}
-
-	char *buf = malloc(SPARSEBUNDLE_PLIST_BUFSIZE);
-	if (!buf) {
-		return false;
-	}
-
-	ssize_t nbytes = read(fd, buf, SPARSEBUNDLE_PLIST_BUFSIZE - 1);
-	close(fd);
-	if (nbytes == -1) {
-		goto fail;
-	}
-	buf[nbytes] = '\0';
-
-	// Does it look like a plist?
-	if (strncmp(buf, "<?xml ", strlen("<?xml ")) != 0
-		|| !strstr(buf, "<!DOCTYPE plist "))
-	{
-		goto fail;
-	}
-
-	// Check the parameters
-	size_t len;
-	const char *v = sparsebundle_plist_find(buf, "diskimage-bundle-type",
-		"string", &len);
-	if (!v || strncmp(v, SPARSEBUNDLE_BUNDLE_TYPE,
-		strlen(SPARSEBUNDLE_BUNDLE_TYPE)) != 0)
-	{
-		goto fail;
-	}
-
-	long long i;
-	if (!sparsebundle_plist_find_int(buf, "bundle-backingstore-version", &i)
-		|| i != 1)
-	{
-		goto fail;
-	}
-
-	if (!sparsebundle_plist_find_int(buf, "size", &i)) {
-		goto fail;
-	}
-	*total_size = i;
-
-	if (!sparsebundle_plist_find_int(buf, "band-size", &i)) {
-		goto fail;
-	}
-	*band_size = i;
-
-	free(buf);
-	return true;
-
-fail:
-	free(buf);
-	return false;
-}
-
-sparsebundle *sparsebundle_open(const char *path)
-{
-	char *plist;
-	if (asprintf(&plist, "%s/%s", path, "Info.plist") == -1) {
-		return NULL;
-	}
-	off_t band_size, total_size;
-	bool ok = sparsebundle_plist_parse(plist, &band_size, &total_size);
-	free(plist);
-	if (!ok) {
-		return NULL;
-	}
-
-	sparsebundle *sb = malloc(sizeof(sparsebundle));
-	if (!sb) {
-		return NULL;
-	}
-	sb->path = malloc(strlen(path) + 1);
-	strcpy(sb->path, path);
-	sb->size = total_size;
-	sb->band_size = band_size;
-	for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
-		sb->bands[i].status = SPARSEBUNDLE_BAND_INIT;
-	}
-	sb->evict = 0;
-	return sb;
-}
-
-void sparsebundle_close(sparsebundle *sb)
-{
-	if (sb) {
-		for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
-			if (sb->bands[i].status == SPARSEBUNDLE_BAND_FILE) {
-				close(sb->bands[i].fd);
-			}
-		}
-		free(sb->path);
-		free(sb);
-	}
-}
-
-int sparsebundle_open_band(sparsebundle *sb, off_t band_index, bool create,
-	sparsebundle_band_status *status)
-{
-	if (status) {
-		*status = SPARSEBUNDLE_BAND_INIT;
-	}
-	if (!sb) {
-		return -1;
-	}
-
-	// Can we use what's in the cache?
-	sparsebundle_band_status target = create
-		? SPARSEBUNDLE_BAND_FILE
-		: SPARSEBUNDLE_BAND_NONE;
-	ssize_t evict = -1;
-	for (int i = 0; i < SPARSEBUNDLE_BAND_CACHE; ++i) {
-		sparsebundle_band *band = &sb->bands[i];
-		if (band->index == band_index &&
-			band->status != SPARSEBUNDLE_BAND_INIT)
-		{
-			if (band->status >= target) {
-				if (status) {
-					*status = band->status;
-				}
-				return band->fd;
-			}
-			evict = i;
-			break;
-		}
-	}
-
-	// Evict an entry.
-	if (evict == -1) {
-		evict = sb->evict;
-		sb->evict = (sb->evict + 1) % SPARSEBUNDLE_BAND_CACHE;
-	}
-	sparsebundle_band *band = &sb->bands[evict];
-	if (band->status == SPARSEBUNDLE_BAND_FILE) {
-		close(band->fd);
-	}
-	band->status = SPARSEBUNDLE_BAND_INIT;
-
-	// Check if the band is in range.
-	if (band_index < 0 || band_index * sb->band_size >= sb->size) {
-		return -1;
-	}
-
-	char *path;
-	if (asprintf(&path, "%s/bands/%llx", sb->path, band_index) == -1) {
-		return -1;
-	}
-	int flags = O_RDWR | (create ? O_CREAT : 0);
-	band->fd = open(path, flags, 0600);
-	free(path);
-
-	band->index = band_index;
-	if (band->fd != -1) {
-		band->status = SPARSEBUNDLE_BAND_FILE;
-	} else if (errno == ENOENT) {
-		band->status = SPARSEBUNDLE_BAND_NONE;
-	} else {
-		band->status = SPARSEBUNDLE_BAND_INIT;
-	}
-	if (status) {
-		*status = band->status;
-	}
-
-	return band->fd;
-}
-
-ssize_t sparsebundle_do(sparsebundle *sb, sparsebundle_op op, void *buf,
-	size_t nbyte, off_t offset)
-{
-	if (!sb) {
-		return -1;
-	}
-
-	if (offset < 0 || offset > sb->size) {
-		return -1;
-	}
-	if (offset == sb->size) {
-		return 0;
-	}
-	if (nbyte > sb->size - offset) {
-		nbyte = sb->size - offset;
-	}
-
-	char *cbuf = buf;
-	char *bufend = cbuf + nbyte;
-
-	size_t band_index = offset / sb->band_size;
-	offset = offset % sb->band_size;
-
-	while (cbuf < bufend) {
-		size_t len = bufend - cbuf;
-		size_t avail = sb->band_size - offset;
-		if (len > avail) {
-			len = avail;
-		}
-
-		if (!op(sb, band_index, cbuf, len, offset)) {
-			return -1;
-		}
-
-		cbuf += len;
-		offset = 0;
-		band_index += 1;
-	}
-
-	return nbyte;
-}
-
-bool sparsebundle_op_read(sparsebundle *sb, size_t band_index, char *buf,
-	size_t nbyte, off_t offset)
-{
-	sparsebundle_band_status status = SPARSEBUNDLE_BAND_INIT;
-	int fd = sparsebundle_open_band(sb, band_index, false, &status);
-
-	if (fd == -1 && status != SPARSEBUNDLE_BAND_NONE) {
-		return false;
-	}
-
-	if (fd != -1) {
-		ssize_t did_read = pread(fd, buf, nbyte, offset);
-		if (did_read == -1) {
-			return false;
-		}
-		buf += did_read;
-		nbyte -= did_read;
-	}
-	if (nbyte) {
-		memset(buf, 0, nbyte);
-	}
-	return true;
-}
-
-bool sparsebundle_op_write(sparsebundle *sb, size_t band_index, char *buf,
-	size_t nbyte, off_t offset)
-{
-	int fd = sparsebundle_open_band(sb, band_index, true, NULL);
-
-	if (fd == -1) {
-		return false;
-	}
-
-	ssize_t did_write = pwrite(fd, buf, nbyte, offset);
-	return did_write == nbyte;
-}
-
-ssize_t sparsebundle_read(sparsebundle *sb, void *buf, size_t nbyte,
-	off_t offset)
-{
-	return sparsebundle_do(sb, &sparsebundle_op_read, buf, nbyte, offset);
-}
-
-ssize_t sparsebundle_write(sparsebundle *sb, void *buf, size_t nbyte,
-	off_t offset)
-{
-	return sparsebundle_do(sb, &sparsebundle_op_write, buf, nbyte, offset);
 }

@@ -398,3 +398,48 @@ EXPORTPROC MyEvtQOutDone(void);
 #define MKC_Print 0x69
 #define MKC_ScrollLock 0x6B
 #define MKC_Pause 0x71
+
+#if HaveSparseBundle
+
+/* Reference to an open file */
+typedef void *sbfl;
+
+/* Reference to a filesystem path */
+typedef void *sbpt;
+
+typedef enum {
+	kSBFileOpenDefault = 0,
+	kSBFileOpenWrite = 1,
+	kSBFileOpenLockExclusive = 2,
+	kSBFileOpenLockShared = 4,
+} SBFileOpenFlags;
+
+typedef enum {
+	kSBFileOpenSuccess = 0,
+	kSBFileOpenFileMissing = 1,
+	kSBFileOpenLockFailed = 2,
+	kSBFileOpenError = 4,
+} SBFileOpenStatus;
+
+
+/* Copy a path */
+EXPORTFUNC sbpt SBPathCopy(sbpt Path);
+
+/* Free a copied path */
+EXPORTPROC SBPathDispose(sbpt Path);
+
+/* Open a file, given a base path, and a null-terminated relative path. */
+EXPORTFUNC tMacErr SBFileOpen(sbfl *File, SBFileOpenStatus *Status,
+	SBFileOpenFlags Flags, sbpt Base, ui3p *Rel);
+
+/* Close an open file */
+EXPORTPROC SBFileClose(sbfl File);
+
+/* Read or write from a file. */
+EXPORTFUNC tMacErr SBFileTransfer(sbfl File, blnr Write, ui3p Buffer,
+	uimr Offset, uimr Count, uimr *ActCount);
+
+/* Get the size of a file */
+EXPORTFUNC tMacErr SBFileSize(sbfl File, uimr *Size);
+
+#endif
